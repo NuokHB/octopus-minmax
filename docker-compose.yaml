@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   minmax_octopus_bot:
     container_name: MinMaxOctopusBot
