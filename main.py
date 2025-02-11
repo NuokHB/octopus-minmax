@@ -1,28 +1,27 @@
 import os
-
-from playwright.sync_api import sync_playwright
 import requests
-from datetime import datetime, date
-from gql import gql, Client
-from gql.transport.aiohttp import AIOHTTPTransport
 import time
 import traceback
+from datetime import datetime, date
+from playwright.sync_api import sync_playwright
+from gql import gql, Client
+from gql.transport.aiohttp import AIOHTTPTransport
 import config
 
+# Global variables for GraphQL client
 gql_transport = None
 gql_client = None
-opposite_tariff = {
-    "AGILE": "GO",
-    "GO": "AGILE"
-}
 
+# List of potential tariffs to compare
+potential_tariffs = ["AGILE", "GO", "COSY"]
+
+# GraphQL queries and mutations
 token_query = """mutation {{
-	obtainKrakenToken(input: {{ APIKey: "{api_key}" }}) {{
-	    token
-	}}
+    obtainKrakenToken(input: {{ APIKey: "{api_key}" }}) {{
+        token
+    }}
 }}"""
 
-# I have no idea if versionMajor or versionMinor has an impact???
 accept_terms_query = """mutation {{
     acceptTermsAndConditions(input: {{
         accountNumber: "{account_number}",
@@ -31,10 +30,9 @@ accept_terms_query = """mutation {{
             versionMajor: 1,
             versionMinor: 1
         }}
-    }}) 
-    {{
-    acceptedVersion
-  }}
+    }}) {{
+        acceptedVersion
+    }}
 }}"""
 
 consumption_query = """query {{
@@ -44,39 +42,40 @@ consumption_query = """query {{
         start: "{start_date}"
         end: "{end_date}"
     ) {{
-    readAt
-    consumptionDelta
-    costDeltaWithTax
-  }}
+        readAt
+        consumptionDelta
+        costDeltaWithTax
+    }}
 }}"""
 
-account_query = """query{{
+account_query = """query {{
     account(
         accountNumber: "{acc_number}"
     ) {{
-    electricityAgreements(active: true) {{
-        validFrom
-        validTo
-        meterPoint {{
-            meters(includeInactive: false) {{
-                smartDevices {{
-                    deviceId
+        electricityAgreements(active: true) {{
+            validFrom
+            validTo
+            meterPoint {{
+                meters(includeInactive: false) {{
+                    smartDevices {{
+                        deviceId
+                    }}
                 }}
+                mpan
             }}
-            mpan
-        }}
-        tariff {{
-            ... on HalfHourlyTariff {{
-                id
-                productCode
-                tariffCode
-                productCode
-                standingCharge
+            tariff {{
+                ... on HalfHourlyTariff {{
+                    id
+                    productCode
+                    tariffCode
+                    productCode
+                    standingCharge
                 }}
             }}
         }}
     }}
 }}"""
+
 enrolment_query = """query {{
     productEnrolments(accountNumber: "{acc_number}") {{
         id
@@ -85,53 +84,49 @@ enrolment_query = """query {{
             code
             displayName
         }}
-    stages {{
-      name
-      status
-      steps {{
-        displayName
-        status
-        updatedAt
-      }}
+        stages {{
+            name
+            status
+            steps {{
+                displayName
+                status
+                updatedAt
+            }}
+        }}
     }}
-  }}
 }}"""
 
-
 def send_discord_message(content):
+    """Send a message to the Discord webhook."""
     print(content)
-    if config.DISCORD_WEBHOOK is not None:
-        content = f"`{content}`"
-        data = {
-            "content": content
-        }
+    if config.DISCORD_WEBHOOK:
+        data = {"content": f"`{content}`"}
         requests.post(config.DISCORD_WEBHOOK, json=data)
 
+def get_token():
+    """Obtain an authentication token using the GraphQL API."""
+    transport = AIOHTTPTransport(url=f"{config.BASE_URL}/graphql/")
+    client = Client(transport=transport, fetch_schema_from_transport=True)
+    query = gql(token_query.format(api_key=config.API_KEY))
+    result = client.execute(query)
+    return result['obtainKrakenToken']['token']
 
-def accept_new_agreement():
-    query = gql(enrolment_query.format(acc_number=config.ACC_NUMBER))
-    result = gql_client.execute(query)
-    try:
-        enrolment_id = next(entry['id'] for entry in result['productEnrolments'] if entry['status'] == "IN_PROGRESS")
-    except StopIteration:
-        # Strangely sometimes the enrolment skips 'IN_PROGRESS' and just auto-accepts, so we check if it's completed with today's date
-        today = datetime.now().date()
+def setup_gql(token):
+    """Set up the GraphQL client with the obtained token."""
+    global gql_transport, gql_client
+    gql_transport = AIOHTTPTransport(url=f"{config.BASE_URL}/graphql/", headers={'Authorization': f'{token}'})
+    gql_client = Client(transport=gql_transport, fetch_schema_from_transport=True)
 
-        for entry in result['productEnrolments']:
-            for stage in entry['stages']:
-                if stage['name'] == 'post-enrolment':
-                    last_step_date = datetime.fromisoformat(
-                        stage['steps'][-1]['updatedAt'].replace('Z', '+00:00')).date()
-                    if last_step_date == today and stage['status'] == 'COMPLETED':
-                        send_discord_message("Post-enrolment automatically completed with today's date.")
-                        return
-
-        raise Exception("ERROR: No completed post-enrolment found today and no in-progress enrolment.")
-    query = gql(accept_terms_query.format(account_number=config.ACC_NUMBER, enrolment_id=enrolment_id))
-    result = gql_client.execute(query)
-
+def rest_query(url):
+    """Make a REST API request and return the response data."""
+    response = requests.get(url)
+    if response.ok:
+        return response.json()
+    else:
+        raise Exception(f"ERROR: rest_query failed querying `{url}` with {response.status_code}")
 
 def get_acc_info():
+    """Retrieve account information, including the current tariff, standing charge, region code, and consumption data."""
     query = gql(account_query.format(acc_number=config.ACC_NUMBER))
     result = gql_client.execute(query)
 
@@ -148,11 +143,13 @@ def get_acc_info():
                             for agreement in result['account']['electricityAgreements']
                             if 'standingCharge' in agreement['tariff'])
 
-    if "GO" in tariff_code:
-        current_tariff = "GO"
-    elif "AGILE" in tariff_code:
-        current_tariff = "AGILE"
-    else:
+    current_tariff = None
+    for tariff in potential_tariffs:
+        if tariff in tariff_code:
+            current_tariff = tariff
+            break
+
+    if current_tariff is None:
         raise Exception(f"ERROR: Unknown tariff code: {tariff_code}")
 
     # Get consumption for today
@@ -163,16 +160,15 @@ def get_acc_info():
 
     return current_tariff, curr_stdn_charge, region_code, consumption
 
-
 def get_potential_tariff_rates(tariff, region_code):
+    """Fetch potential tariff rates for a given tariff and region code."""
     all_products = rest_query(f"{config.BASE_URL}/products")
     tariff_code = next(
         product["code"] for product in all_products['results']
-        if product['display_name'] == ("Agile Octopus" if tariff == "AGILE" else "Octopus Go")
+        if product['display_name'] == ("Agile Octopus" if tariff == "AGILE" else "Octopus Go" if tariff == "GO" else "Cosy Octopus")
         and product['direction'] == "IMPORT"
         and product['brand'] == "OCTOPUS_ENERGY"
     )
-    # Residential tariffs are always E-1R (i think, lol)    
     product_code = f"E-1R-{tariff_code}-{region_code}"
 
     today = date.today()
@@ -183,17 +179,8 @@ def get_potential_tariff_rates(tariff, region_code):
 
     return standing_charge['results'][0]['value_inc_vat'], unit_rates['results']
 
-
-def rest_query(url):
-    response = requests.get(url)
-    if response.ok:
-        data = response.json()
-        return data
-    else:
-        raise Exception(f"ERROR: rest_query failed querying `{url}` with {response.status_code}")
-
-
 def calculate_potential_costs(consumption_data, rate_data):
+    """Calculate potential costs based on consumption data and rate data."""
     period_costs = []
     for consumption in consumption_data:
         read_time = consumption['readAt'].replace('+00:00', 'Z')
@@ -213,23 +200,40 @@ def calculate_potential_costs(consumption_data, rate_data):
         })
     return period_costs
 
+def accept_new_agreement():
+    """Accept a new agreement if an enrolment is in progress or automatically completed."""
+    query = gql(enrolment_query.format(acc_number=config.ACC_NUMBER))
+    result = gql_client.execute(query)
+    try:
+        enrolment_id = next(entry['id'] for entry in result['productEnrolments'] if entry['status'] == "IN_PROGRESS")
+    except StopIteration:
+        today = datetime.now().date()
+        for entry in result['productEnrolments']:
+            for stage in entry['stages']:
+                if stage['name'] == 'post-enrolment':
+                    last_step_date = datetime.fromisoformat(
+                        stage['steps'][-1]['updatedAt'].replace('Z', '+00:00')).date()
+                    if last_step_date == today and stage['status'] == 'COMPLETED':
+                        send_discord_message("Post-enrolment automatically completed with today's date.")
+                        return
+        raise Exception("ERROR: No completed post-enrolment found today and no in-progress enrolment.")
+    query = gql(accept_terms_query.format(account_number=config.ACC_NUMBER, enrolment_id=enrolment_id))
+    gql_client.execute(query)
 
-def get_token():
-    transport = AIOHTTPTransport(url=f"{config.BASE_URL}/graphql/")
-    client = Client(transport=transport, fetch_schema_from_transport=True)
-    query = gql(token_query.format(api_key=config.API_KEY))
-    result = client.execute(query)
-    return result['obtainKrakenToken']['token']
-
+def verify_new_agreement():
+    """Verify if a new agreement has been successfully accepted."""
+    query = gql(account_query.format(acc_number=config.ACC_NUMBER))
+    result = gql_client.execute(query)
+    today = datetime.now().date()
+    valid_from = next(datetime.fromisoformat(agreement['validFrom']).date()
+                      for agreement in result['account']['electricityAgreements']
+                      if 'validFrom' in agreement)
+    return valid_from == today
 
 def switch_tariff(target_tariff):
+    """Use Playwright to automate the process of switching tariffs on the Octopus Energy website."""
     with sync_playwright() as playwright:
-        browser = None
-        try:
-            browser = playwright.chromium.launch(
-                headless=True)
-        except Exception as e:
-            print(e)  # Should print out if its not working
+        browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         page.goto("https://octopus.energy/")
@@ -238,7 +242,6 @@ def switch_tariff(target_tariff):
         page.wait_for_timeout(1000)
         page.get_by_placeholder("Email address").click()
         page.wait_for_timeout(1000)
-        # replace w env
         page.get_by_placeholder("Email address").fill(config.OCTOPUS_LOGIN_EMAIL)
         page.wait_for_timeout(1000)
         page.get_by_placeholder("Email address").press("Tab")
@@ -247,54 +250,41 @@ def switch_tariff(target_tariff):
         page.wait_for_timeout(1000)
         page.get_by_placeholder("Password").press("Enter")
         page.wait_for_timeout(1000)
-        # replace with env
         page.goto(f"https://octopus.energy/smart/{target_tariff.lower()}/sign-up/?accountNumber={config.ACC_NUMBER}")
         page.wait_for_timeout(10000)
         page.locator("section").filter(has_text="Already have a SMETS2 or “").get_by_role("button").click()
         page.wait_for_timeout(10000)
-        # check if url has success
         context.close()
         browser.close()
 
-
-def verify_new_agreement():
-    query = gql(account_query.format(acc_number=config.ACC_NUMBER))
-    result = gql_client.execute(query)
-    today = datetime.now().date()
-    valid_from = next(datetime.fromisoformat(agreement['validFrom']).date()
-                      for agreement in result['account']['electricityAgreements']
-                      if 'validFrom' in agreement)
-
-    # For some reason, sometimes the agreement has no end date so I'm not not sure if this bit is still relevant?
-    # valid_to = datetime.fromisoformat(result['account']['electricityAgreements'][0]['validTo']).date()
-    # next_year = valid_from.replace(year=valid_from.year + 1)
-    return valid_from == today
-
-
-def setup_gql(token):
-    global gql_transport, gql_client
-    gql_transport = AIOHTTPTransport(url=f"{config.BASE_URL}/graphql/", headers={'Authorization': f'{token}'})
-    gql_client = Client(transport=gql_transport, fetch_schema_from_transport=True)
-
-
 def compare_and_switch():
+    """Compare current and potential costs, and switch tariffs if the potential cost is lower."""
     send_discord_message("Octobot on. Starting comparison of today's costs...")
-    (curr_tariff, curr_stdn_charge, region_code, consumption) = get_acc_info()
+    curr_tariff, curr_stdn_charge, region_code, consumption = get_acc_info()
     total_curr_cost = sum(float(entry['costDeltaWithTax']) for entry in consumption) + curr_stdn_charge
+    send_discord_message(f"Current cost on {curr_tariff}: £{total_curr_cost / 100:.2f}")
+    best_tariff = curr_tariff
+    best_cost = total_curr_cost
 
-    (potential_std_charge, potential_unit_rates) = get_potential_tariff_rates(opposite_tariff[curr_tariff], region_code)
+    for tariff in potential_tariffs:
+        if tariff == curr_tariff:
+            continue
 
-    potential_costs = calculate_potential_costs(consumption, potential_unit_rates)
+        potential_std_charge, potential_unit_rates = get_potential_tariff_rates(tariff, region_code)
+        potential_costs = calculate_potential_costs(consumption, potential_unit_rates)
+        total_potential_calculated = sum(period['calculated_cost'] for period in potential_costs) + potential_std_charge
+        send_discord_message(f"Potential cost on {tariff}: £{total_potential_calculated / 100:.2f}")
+        if total_potential_calculated < best_cost:
+            best_tariff = tariff
+            best_cost = total_potential_calculated
 
-    total_potential_calculated = sum(period['calculated_cost'] for period in potential_costs) + potential_std_charge
-    summary = "Total potential cost on {}: £{:.2f} vs your current cost on {}: £{:.2f}"
-    summary = summary.format(opposite_tariff[curr_tariff], total_potential_calculated / 100, curr_tariff, total_curr_cost / 100)
-    # 2p buffer because cba
-    if (total_potential_calculated + 2) < total_curr_cost:
-        send_discord_message(summary + "\nInitiating Switch to " + opposite_tariff[curr_tariff])
-        switch_tariff(opposite_tariff[curr_tariff])
+    summary = f"Best potential cost on {best_tariff}: £{best_cost / 100:.2f} vs your current cost on {curr_tariff}: £{total_curr_cost / 100:.2f}"
+    if config.DRY_RUN:
+        send_discord_message("DRY RUN: " + summary)
+    elif best_tariff != curr_tariff:
+        send_discord_message(summary + f"\nInitiating Switch to {best_tariff}")
+        switch_tariff(best_tariff)
         send_discord_message("Tariff switch requested successfully.")
-        # Give octopus some time to generate the agreement
         time.sleep(60)
         accept_new_agreement()
         send_discord_message("Accepted agreement. Switch successful.")
@@ -306,13 +296,16 @@ def compare_and_switch():
     else:
         send_discord_message("Not switching today. " + summary)
 
-
 def run_tariff_compare():
+    """Main function to run the tariff comparison and switching process."""
     try:
         setup_gql(get_token())
-        if gql_transport is not None and gql_client is not None:
+        if gql_transport and gql_client:
             compare_and_switch()
         else:
             raise Exception("ERROR: setup_gql has failed")
     except Exception:
         send_discord_message(traceback.format_exc())
+
+if __name__ == "__main__":
+    run_tariff_compare()

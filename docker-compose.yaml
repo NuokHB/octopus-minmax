@@ -8,6 +8,8 @@ services:
       - API_KEY=<your_api_key>
       - OCTOPUS_LOGIN_EMAIL=<your_email>
       - OCTOPUS_LOGIN_PASSWD=<your_password>
+      # Optional
       - EXECUTION_TIME=23:00
       - DISCORD_WEBHOOK=<your_webhook_url>
       - ONE_OFF=false
+      - DRY_RUN=false
