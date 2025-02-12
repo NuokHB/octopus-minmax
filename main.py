@@ -250,6 +250,9 @@ def switch_tariff(target_tariff):
         page.wait_for_timeout(1000)
         page.get_by_placeholder("Password").press("Enter")
         page.wait_for_timeout(1000)
+        # Website is different for COSY tariff
+        if target_tariff == "COSY":
+            page.goto(f"https://octopus.energy/smart/cosy-octopus/sign-up/?accountNumber={config.ACC_NUMBER}")
         page.goto(f"https://octopus.energy/smart/{target_tariff.lower()}/sign-up/?accountNumber={config.ACC_NUMBER}")
         page.wait_for_timeout(10000)
         page.locator("section").filter(has_text="Already have a SMETS2 or “").get_by_role("button").click()
