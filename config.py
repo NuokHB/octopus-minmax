@@ -9,6 +9,8 @@ DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 OCTOPUS_LOGIN_EMAIL = os.getenv("OCTOPUS_LOGIN_EMAIL", "")
 OCTOPUS_LOGIN_PASSWD = os.getenv("OCTOPUS_LOGIN_PASSWD", "")
 EXECUTION_TIME = os.getenv("EXECUTION_TIME", "23:00")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # Whether to just run immediately and exit
 ONE_OFF_RUN = os.getenv("ONE_OFF", "false") in ["true", "True", "1"]
