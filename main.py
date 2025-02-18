@@ -96,12 +96,29 @@ enrolment_query = """query {{
     }}
 }}"""
 
-def send_discord_message(content):
-    """Send a message to the Discord webhook."""
-    print(content)
-    if config.DISCORD_WEBHOOK:
-        data = {"content": f"`{content}`"}
-        requests.post(config.DISCORD_WEBHOOK, json=data)
+def send_message(content):
+    """
+    Sends a message to Discord and/or Telegram based on the config.py file if those variables are set.
+    """
+    print(content)  # Log the message regardless of where it's sent
+
+    if hasattr(config, 'DISCORD_WEBHOOK') and config.DISCORD_WEBHOOK:
+        content_discord = f"`{content}`"
+        data = {"content": content_discord}
+        try:
+            response = requests.post(config.DISCORD_WEBHOOK, json=data)
+            response.raise_for_status()  # Raise HTTPError for bad responses
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending Discord message: {e}")
+
+    if hasattr(config, 'TELEGRAM_BOT_TOKEN') and config.TELEGRAM_BOT_TOKEN and hasattr(config, 'TELEGRAM_CHAT_ID') and config.TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {"chat_id": config.TELEGRAM_CHAT_ID, "text": content}
+        try:
+            response = requests.post(url, data=data)
+            response.raise_for_status()  # Raise HTTPError for bad responses
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending Telegram message: {e}")
 
 def get_token():
     """Obtain an authentication token using the GraphQL API."""
@@ -214,7 +231,7 @@ def accept_new_agreement():
                     last_step_date = datetime.fromisoformat(
                         stage['steps'][-1]['updatedAt'].replace('Z', '+00:00')).date()
                     if last_step_date == today and stage['status'] == 'COMPLETED':
-                        send_discord_message("Post-enrolment automatically completed with today's date.")
+                        send_message("Post-enrolment automatically completed with today's date.")
                         return
         raise Exception("ERROR: No completed post-enrolment found today and no in-progress enrolment.")
     query = gql(accept_terms_query.format(account_number=config.ACC_NUMBER, enrolment_id=enrolment_id))
@@ -262,10 +279,10 @@ def switch_tariff(target_tariff):
 
 def compare_and_switch():
     """Compare current and potential costs, and switch tariffs if the potential cost is lower."""
-    send_discord_message("Octobot on. Starting comparison of today's costs...")
+    send_message("Octobot on. Starting comparison of today's costs...")
     curr_tariff, curr_stdn_charge, region_code, consumption = get_acc_info()
     total_curr_cost = sum(float(entry['costDeltaWithTax']) for entry in consumption) + curr_stdn_charge
-    send_discord_message(f"Current cost on {curr_tariff}: £{total_curr_cost / 100:.2f}")
+    send_message(f"Current cost on {curr_tariff}: £{total_curr_cost / 100:.2f}")
     best_tariff = curr_tariff
     best_cost = total_curr_cost
 
@@ -276,28 +293,28 @@ def compare_and_switch():
         potential_std_charge, potential_unit_rates = get_potential_tariff_rates(tariff, region_code)
         potential_costs = calculate_potential_costs(consumption, potential_unit_rates)
         total_potential_calculated = sum(period['calculated_cost'] for period in potential_costs) + potential_std_charge
-        send_discord_message(f"Potential cost on {tariff}: £{total_potential_calculated / 100:.2f}")
+        send_message(f"Potential cost on {tariff}: £{total_potential_calculated / 100:.2f}")
         if total_potential_calculated < best_cost:
             best_tariff = tariff
             best_cost = total_potential_calculated
 
     summary = f"Best potential cost on {best_tariff}: £{best_cost / 100:.2f} vs your current cost on {curr_tariff}: £{total_curr_cost / 100:.2f}"
     if config.DRY_RUN:
-        send_discord_message("DRY RUN: " + summary)
+        send_message("DRY RUN: " + summary)
     elif best_tariff != curr_tariff:
-        send_discord_message(summary + f"\nInitiating Switch to {best_tariff}")
+        send_message(summary + f"\nInitiating Switch to {best_tariff}")
         switch_tariff(best_tariff)
-        send_discord_message("Tariff switch requested successfully.")
+        send_message("Tariff switch requested successfully.")
         time.sleep(60)
         accept_new_agreement()
-        send_discord_message("Accepted agreement. Switch successful.")
+        send_message("Accepted agreement. Switch successful.")
 
         if verify_new_agreement():
-            send_discord_message("Verified new agreement successfully. Process finished.")
+            send_message("Verified new agreement successfully. Process finished.")
         else:
-            send_discord_message("Unable to accept new agreement. Please check your emails.")
+            send_message("Unable to accept new agreement. Please check your emails.")
     else:
-        send_discord_message("Not switching today. " + summary)
+        send_message("Not switching today. " + summary)
 
 def run_tariff_compare():
     """Main function to run the tariff comparison and switching process."""
@@ -308,7 +325,7 @@ def run_tariff_compare():
         else:
             raise Exception("ERROR: setup_gql has failed")
     except Exception:
-        send_discord_message(traceback.format_exc())
+        send_message(traceback.format_exc())
 
 if __name__ == "__main__":
     run_tariff_compare()
